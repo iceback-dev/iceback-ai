@@ -1,0 +1,328 @@
+<script>
+    (function() {
+        'use strict';
+
+        // ─── DOM REFS ──────────────────────────────────────────────
+        const promptInput = document.getElementById('promptInput');
+        const generateBtn = document.getElementById('generateBtn');
+        const progressSection = document.getElementById('progressSection');
+        const progressStatus = document.getElementById('progressStatus');
+        const progressFill = document.getElementById('progressFill');
+        const progressPercent = document.getElementById('progressPercent');
+        const videoOutput = document.getElementById('videoOutput');
+        const generatedVideo = document.getElementById('generatedVideo');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const shareBtn = document.getElementById('shareBtn');
+        const regenerateBtn = document.getElementById('regenerateBtn');
+        const saveProjectBtn = document.getElementById('saveProjectBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const historyContainer = document.getElementById('historyContainer');
+        const uploadZone = document.getElementById('uploadZone');
+        const imageUpload = document.getElementById('imageUpload');
+        const imagePreview = document.getElementById('imagePreview');
+        const uploadedImagePreview = document.getElementById('uploadedImagePreview');
+        const removeImageBtn = document.getElementById('removeImageBtn');
+        const enhanceBtn = document.getElementById('enhanceBtn');
+        const toastContainer = document.getElementById('toastContainer');
+
+        // ─── STATE ──────────────────────────────────────────────────
+        let uploadedImage = null; // File object or null
+        let isGenerating = false;
+        let currentJobId = null;
+        let pollInterval = null;
+        let currentVideoUrl = '';
+        let videoHistory = JSON.parse(localStorage.getItem('iceback_history') || '[]');
+
+        // ─── PILL SELECTORS (unchanged) ──────────────────────────
+        document.querySelectorAll('#videoTypeContainer .pill').forEach(el => {
+            el.addEventListener('click', function() {
+                document.querySelectorAll('#videoTypeContainer .pill').forEach(p => p.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+        document.querySelectorAll('#styleContainer .pill').forEach(el => {
+            el.addEventListener('click', function() {
+                document.querySelectorAll('#styleContainer .pill').forEach(p => p.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+
+        // ─── IMAGE UPLOAD ──────────────────────────────────────────
+        uploadZone.addEventListener('click', () => imageUpload.click());
+        uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('border-blue-400'); });
+        uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('border-blue-400'));
+        uploadZone.addEventListener('drop', e => {
+            e.preventDefault();
+            uploadZone.classList.remove('border-blue-400');
+            if (e.dataTransfer.files.length) handleImageFile(e.dataTransfer.files[0]);
+        });
+        imageUpload.addEventListener('change', function() {
+            if (this.files.length) handleImageFile(this.files[0]);
+            this.value = '';
+        });
+
+        function handleImageFile(file) {
+            if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+                toast('Only JPG, PNG, WEBP allowed.', 'error');
+                return;
+            }
+            uploadedImage = file;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                uploadedImagePreview.src = e.target.result;
+                imagePreview.classList.remove('hidden');
+                uploadZone.classList.add('hidden');
+            };
+            reader.readAsDataURL(file);
+        }
+
+        removeImageBtn.addEventListener('click', function() {
+            uploadedImage = null;
+            imagePreview.classList.add('hidden');
+            uploadZone.classList.remove('hidden');
+            uploadedImagePreview.src = '';
+        });
+
+        // ─── ENHANCE PROMPT ────────────────────────────────────────
+        enhanceBtn.addEventListener('click', function() {
+            const text = promptInput.value.trim();
+            if (!text) { toast('Please write a description first.', 'error'); return; }
+            promptInput.value = `Create a cinematic video of ${text}. Use smooth camera movements and realistic lighting.`;
+            toast('✨ Prompt enhanced!');
+        });
+
+        // ─── TOAST ──────────────────────────────────────────────────
+        function toast(msg, type = 'info') {
+            const div = document.createElement('div');
+            div.className = `toast-notification ${type === 'error' ? 'border-red-500/30 text-red-300' : 'border-blue-500/30 text-white'}`;
+            div.textContent = msg;
+            toastContainer.appendChild(div);
+            setTimeout(() => { div.style.opacity = '0'; setTimeout(() => div.remove(), 400); }, 4000);
+        }
+
+        // ─── UTILITY: file to base64 ──────────────────────────────
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // ─── GENERATE VIDEO ────────────────────────────────────────
+        generateBtn.addEventListener('click', startGeneration);
+        regenerateBtn.addEventListener('click', startGeneration);
+
+        async function startGeneration() {
+            if (isGenerating) return;
+            const prompt = promptInput.value.trim();
+            if (!prompt) {
+                toast('Please describe the video you want to create.', 'error');
+                return;
+            }
+
+            isGenerating = true;
+            generateBtn.disabled = true;
+            generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+            progressSection.classList.remove('hidden');
+            videoOutput.classList.add('hidden');
+            progressFill.style.width = '0%';
+            progressPercent.textContent = '0%';
+            progressStatus.textContent = 'Submitting your request...';
+
+            // Prepare image (if any) as base64
+            let imageBase64 = null;
+            if (uploadedImage) {
+                imageBase64 = await fileToBase64(uploadedImage);
+            }
+
+            try {
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt, image: imageBase64 }),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Generation failed');
+                currentJobId = data.jobId;
+                progressStatus.textContent = 'Processing...';
+                generateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+                // Start polling
+                pollInterval = setInterval(() => pollStatus(currentJobId), 2000);
+            } catch (err) {
+                toast('Error: ' + err.message, 'error');
+                resetUI();
+            }
+        }
+
+        // ─── POLL STATUS ───────────────────────────────────────────
+        async function pollStatus(jobId) {
+            try {
+                const res = await fetch(`/api/status?jobId=${jobId}`);
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Status error');
+
+                if (data.status === 'queued' || data.status === 'processing') {
+                    progressStatus.textContent = 'Generating video...';
+                    const current = parseInt(progressFill.style.width || '0');
+                    const inc = Math.random() * 3 + 1;
+                    const newVal = Math.min(current + inc, 90);
+                    progressFill.style.width = newVal + '%';
+                    progressPercent.textContent = Math.round(newVal) + '%';
+                } else if (data.status === 'completed') {
+                    clearInterval(pollInterval);
+                    const videoUrl = data.videoUrl;
+                    if (videoUrl) {
+                        displayVideo(videoUrl, promptInput.value);
+                        saveToHistory(videoUrl, promptInput.value);
+                        toast('✅ Video generated successfully!');
+                    } else {
+                        toast('No video URL returned.', 'error');
+                    }
+                    resetUI();
+                } else if (data.status === 'failed') {
+                    clearInterval(pollInterval);
+                    toast('Generation failed: ' + (data.error || 'Unknown error'), 'error');
+                    resetUI();
+                } else if (data.status === 'cancelled') {
+                    clearInterval(pollInterval);
+                    toast('Generation cancelled.', 'error');
+                    resetUI();
+                }
+            } catch (err) {
+                clearInterval(pollInterval);
+                toast('Status check failed: ' + err.message, 'error');
+                resetUI();
+            }
+        }
+
+        // ─── DISPLAY VIDEO ─────────────────────────────────────────
+        function displayVideo(url, prompt) {
+            videoOutput.classList.remove('hidden');
+            generatedVideo.src = url;
+            generatedVideo.load();
+            currentVideoUrl = url;
+            generateBtn.innerHTML = '<i class="fas fa-play"></i> GENERATE VIDEO';
+            generateBtn.disabled = false;
+            isGenerating = false;
+            progressSection.classList.add('hidden');
+        }
+
+        // ─── DOWNLOAD ──────────────────────────────────────────────
+        downloadBtn.addEventListener('click', function() {
+            if (currentVideoUrl) {
+                const a = document.createElement('a');
+                a.href = currentVideoUrl;
+                a.download = 'iceback_ai_video.mp4';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                toast('Downloading...');
+            } else {
+                toast('No video to download.', 'error');
+            }
+        });
+
+        // ─── SHARE ──────────────────────────────────────────────────
+        shareBtn.addEventListener('click', function() {
+            if (navigator.share && currentVideoUrl) {
+                navigator.share({
+                    title: 'ICEBACK AI Video',
+                    text: 'Check out my AI-generated video!',
+                    url: currentVideoUrl,
+                }).catch(() => {});
+            } else {
+                toast('Copy the video URL: ' + currentVideoUrl);
+            }
+        });
+
+        // ─── SAVE PROJECT ──────────────────────────────────────────
+        saveProjectBtn.addEventListener('click', function() {
+            const name = prompt('Enter project name:', 'My Project');
+            if (name) {
+                const projects = JSON.parse(localStorage.getItem('iceback_projects') || '[]');
+                projects.push({
+                    id: Date.now(),
+                    name: name,
+                    prompt: promptInput.value,
+                    videoUrl: currentVideoUrl,
+                    date: new Date().toLocaleString(),
+                });
+                localStorage.setItem('iceback_projects', JSON.stringify(projects));
+                toast('Project saved!');
+            }
+        });
+
+        // ─── HISTORY ───────────────────────────────────────────────
+        function saveToHistory(videoUrl, prompt) {
+            const entry = {
+                id: Date.now(),
+                prompt: prompt.slice(0, 60) + (prompt.length > 60 ? '...' : ''),
+                videoUrl: videoUrl,
+                date: new Date().toLocaleString(),
+            };
+            videoHistory.unshift(entry);
+            localStorage.setItem('iceback_history', JSON.stringify(videoHistory));
+            renderHistory();
+        }
+
+        function renderHistory() {
+            if (!videoHistory.length) {
+                historyContainer.innerHTML =
+                    `<div class="glass p-6 text-center text-gray-500 col-span-full">No videos yet. Generate your first video!</div>`;
+                return;
+            }
+            historyContainer.innerHTML = videoHistory.map(item => `
+              <div class="glass p-4 hover:border-blue-500/20 transition">
+                <div class="aspect-video bg-[#0d1225] rounded-xl flex items-center justify-center text-4xl mb-3">🎬</div>
+                <h4 class="font-semibold truncate">${item.prompt}</h4>
+                <div class="flex items-center justify-between text-xs text-gray-400 mt-1">
+                  <span>${item.date}</span>
+                  <button class="text-blue-400 hover:text-white watch-history" data-url="${item.videoUrl}">Watch</button>
+                </div>
+              </div>
+            `).join('');
+            historyContainer.querySelectorAll('.watch-history').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const url = this.dataset.url;
+                    if (url) {
+                        displayVideo(url, '');
+                        document.getElementById('videoOutput').scrollIntoView({ behavior: 'smooth' });
+                    }
+                });
+            });
+        }
+
+        // ─── CANCEL ─────────────────────────────────────────────────
+        cancelBtn.addEventListener('click', async function() {
+            if (currentJobId) {
+                try {
+                    // We don't have a cancel endpoint yet, but we can stop polling
+                    clearInterval(pollInterval);
+                    toast('Cancellation requested (polling stopped).');
+                } catch (e) {
+                    toast('Cancel failed.');
+                }
+                resetUI();
+            }
+        });
+
+        // ─── RESET UI ──────────────────────────────────────────────
+        function resetUI() {
+            isGenerating = false;
+            generateBtn.disabled = false;
+            generateBtn.innerHTML = '<i class="fas fa-play"></i> GENERATE VIDEO';
+            progressSection.classList.add('hidden');
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
+
+        // ─── INIT ──────────────────────────────────────────────────
+        renderHistory();
+        toast('🚀 Serverless API ready – generate your video!');
+        console.log('🧊 ICEBACK AI with Vercel serverless functions loaded.');
+    })();
+              </script>
